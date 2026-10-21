@@ -1,6 +1,8 @@
 import streamlit as st
 from PIL import Image
 from google import genai
+from google.genai import errors
+import time
 
 # 1. Sidinställningar
 st.set_page_config(page_title="Läsmästaren: Uppdraget", page_icon="📖", layout="centered")
@@ -32,7 +34,11 @@ text_data = None
 if val == "Ta ett foto med kameran":
     foto = st.camera_input("Rikta kameran mot boksidan och ta ett foto")
     if foto:
-        bild_data = Image.open(foto)
+        raw_img = Image.open(foto)
+        # Konvertera till RGB för att undvika färgrymdsfel hos API:et
+        bild_data = raw_img.convert("RGB")
+        # Begränsa maxupplösning för snabb och stabil överföring
+        bild_data.thumbnail((1200, 1200))
         st.image(bild_data, caption="Ditt foto", width=300)
 else:
     text_data = st.text_area("Skriv eller klistra in några rader från kapitlet:", height=150)
@@ -41,7 +47,7 @@ if st.button("Skapa mina läsuppdrag ✨"):
     if not bild_data and not text_data:
         st.warning("Du måste ta ett foto eller skriva in text först!")
     else:
-        with st.spinner("Läsmästaren analyserar texten och skapar uppdrag..."):
+        with st.spinner("Läsmästaren läser texten och skapar uppdrag..."):
             prompt_fragor = """
             Du är en uppmuntrande svensklärare för elever i årskurs 4 och 5.
             Läs texten på bilden eller i texten noggrant. 
@@ -63,14 +69,27 @@ if st.button("Skapa mina läsuppdrag ✨"):
                 innehall.append(bild_data)
             if text_data:
                 innehall.append(text_data)
-                
-            respons = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=innehall
-            )
             
-            st.session_state.fragor = respons.text
-            st.session_state.boktext = text_data if text_data else "Bildanalys"
+            # Anropa med felhantering för tillfälliga serverstörningar
+            lyckades = False
+            for forsok in range(2):
+                try:
+                    respons = client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=innehall
+                    )
+                    st.session_state.fragor = respons.text
+                    st.session_state.boktext = text_data if text_data else "Bildanalys"
+                    lyckades = True
+                    break
+                except errors.ServerError:
+                    time.sleep(2)  # Vänta 2 sekunder och prova en gång till
+                except Exception as e:
+                    st.error(f"Ett fel uppstod: {e}")
+                    break
+            
+            if not lyckades and "fragor" not in st.session_state:
+                st.error("Googles servrar är tillfälligt överbelastade just nu. Vänta 10 sekunder och klicka på knappen igen!")
 
 # 4. Svarsdel och formativ rättning
 if st.session_state.fragor:
@@ -106,10 +125,14 @@ if st.session_state.fragor:
                 - Håll tonen inspirerande med emojis.
                 """
                 
-                bedomning = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=[prompt_rattning]
-                )
-                
-                st.success("Här är Läsmästarens återkoppling:")
-                st.markdown(bedomning.text)
+                try:
+                    bedomning = client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=[prompt_rattning]
+                    )
+                    st.success("Här är Läsmästarens återkoppling:")
+                    st.markdown(bedomning.text)
+                except errors.ServerError:
+                    st.error("Googles AI-server svarade inte just nu. Prova att klicka på 'Lämna in svar' igen om några sekunder!")
+                except Exception as e:
+                    st.error(f"Ett oväntat fel inträffade: {e}")
