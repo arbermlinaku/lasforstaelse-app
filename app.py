@@ -3,15 +3,29 @@ from PIL import Image
 from google import genai
 from google.genai import errors
 import json
+import os
 import re
 
-# 1. Sidinställningar
-st.set_page_config(page_title="Läsmästaren: Uppdraget", page_icon="📖", layout="centered")
+# 1. Sidkonfiguration
+st.set_page_config(page_title="Läsmästaren: Bokäventyret", page_icon="🎮", layout="centered")
 
-st.title("📖 Läsmästaren: Bokäventyret")
-st.write("Läs ett kapitel i boken, ta ett foto eller skriv in texten och klara alla 6 nivåer!")
+# Fil för att spara alla elevers framsteg
+SPARFIL = "framsteg.json"
 
-# 2. Hämta API-nyckel
+def ladda_framsteg():
+    if os.path.exists(SPARFIL):
+        try:
+            with open(SPARFIL, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def spara_framsteg(data):
+    with open(SPARFIL, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# 2. Initiering av Gemini API
 api_key = st.secrets.get("GEMINI_API_KEY")
 if not api_key:
     st.error("API-nyckel saknas! Konfigurera GEMINI_API_KEY i Secrets.")
@@ -19,134 +33,210 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# 3. Sessionsvariabler för att hålla reda på nivåer och framsteg
+# 3. Sessionsvariabler för spelet
+if "spelar_data" not in st.session_state:
+    st.session_state.spelar_data = ladda_framsteg()
+if "aktivt_kapitel" not in st.session_state:
+    st.session_state.aktivt_kapitel = None
 if "uppdrag_lista" not in st.session_state:
     st.session_state.uppdrag_lista = []
 if "aktuellt_index" not in st.session_state:
     st.session_state.aktuellt_index = 0
 if "senaste_feedback" not in st.session_state:
     st.session_state.senaste_feedback = None
-if "boktext" not in st.session_state:
-    st.session_state.boktext = None
 
-# Funktion för att starta om äventyret
-def nollstall():
-    st.session_state.uppdrag_lista = []
-    st.session_state.aktuellt_index = 0
-    st.session_state.senaste_feedback = None
-    st.session_state.boktext = None
+st.title("🎮 Läsmästaren: Bokäventyret")
 
-# 4. Inmatning: Visa bara om uppdrag inte har skapats än
-if not st.session_state.uppdrag_lista:
-    st.subheader("Steg 1: Lägg in boksidan")
-    val = st.radio("Hur vill du lägga in texten?", ["Ta ett foto med kameran", "Skriv eller klistra in text"], horizontal=True)
+# 4. Spelarprofil & Inloggning
+st.sidebar.header("👤 Spelarprofil")
+elev_namn = st.sidebar.text_input("Ditt namn eller hemliga alias:").strip().lower()
+bok_titel = st.sidebar.text_input("Bokens titel:").strip().lower()
 
-    bild_data = None
-    text_data = None
+if not elev_namn or not bok_titel:
+    st.info("👋 Välkommen! Börja med att skriva in ditt namn och bokens titel i menyn till vänster för att ladda din sparfil.")
+    st.stop()
 
-    if val == "Ta ett foto med kameran":
-        foto = st.camera_input("Rikta kameran mot boksidan och ta ett foto")
-        if foto:
-            raw_img = Image.open(foto)
-            bild_data = raw_img.convert("RGB")
-            bild_data.thumbnail((1200, 1200))
-            st.image(bild_data, caption="Ditt foto", width=300)
-    else:
-        text_data = st.text_area("Skriv eller klistra in några rader från kapitlet:", height=150)
+# Skapa eller hämta elevens profil i sparfilen
+profil_nyckel = f"{elev_namn}###{bok_titel}"
+framsteg_db = ladda_framsteg()
 
-    if st.button("Starta läsäventyret ✨"):
-        if not bild_data and not text_data:
-            st.warning("Du måste ta ett foto eller skriva in text först!")
-        else:
-            with st.spinner("Läsmästaren läser och förbereder dina 6 uppdrag..."):
-                prompt = """
-                Du är en svensklärare för årskurs 4 och 5. Läs bifogad text eller bild noggrant.
-                Skapa exakt 6 läsförståelsefrågor anpassade efter Lgr22 i följande ordning:
-                - Fråga 1 till 3: LÄTT (faktafrågor där svaret står rakt ut i texten, 'på raderna')
-                - Fråga 4 till 5: MEDEL (inferensfrågor om känslor, orsaker eller varför, 'mellan raderna')
-                - Fråga 6: SVÅR (tolkning, budskap eller reflektion till egna livet, 'bortom raderna')
+if profil_nyckel not in framsteg_db:
+    framsteg_db[profil_nyckel] = {
+        "namn": elev_namn,
+        "bok": bok_titel,
+        "klarade_kapitel": []  # t.ex. [1, 2]
+    }
+    spara_framsteg(framsteg_db)
 
-                Svara ENDAST med ett giltigt JSON-format (en lista med 6 objekt). Inget annat!
-                Format:
-                [
-                  {"nummer": 1, "niva": "Lätt", "fraga": "..."},
-                  {"nummer": 2, "niva": "Lätt", "fraga": "..."},
-                  {"nummer": 3, "niva": "Lätt", "fraga": "..."},
-                  {"nummer": 4, "niva": "Medel", "fraga": "..."},
-                  {"nummer": 5, "niva": "Medel", "fraga": "..."},
-                  {"nummer": 6, "niva": "Svår", "fraga": "..."}
-                ]
-                """
-                innehall = [prompt]
-                if bild_data:
-                    innehall.append(bild_data)
-                if text_data:
-                    innehall.append(text_data)
+elev_profil = framsteg_db[profil_nyckel]
+klarade = set(elev_profil.get("klarade_kapitel", []))
 
-                try:
-                    respons = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=innehall
-                    )
-                    # Tvätta bort eventuella markdown-block så att JSON kan tolkas rent
-                    ren_json = respons.text.strip()
-                    ren_json = re.sub(r"^```(?:json)?\n?|```$", "", ren_json, flags=re.MULTILINE).strip()
-                    st.session_state.uppdrag_lista = json.loads(ren_json)
-                    st.session_state.aktuellt_index = 0
-                    st.session_state.boktext = text_data if text_data else "Bildanalys"
-                    st.rerun()
-                except Exception as e:
-                    st.error("Kunde inte läsa in uppdragen automatiskt. Försök ta en skarpare bild eller klistra in texten direkt.")
+# ---------------------------------------------------------------------
+# VY 1: SPELKARTAN (Visas när eleven inte är mitt i ett uppdrag)
+# ---------------------------------------------------------------------
+if st.session_state.aktivt_kapitel is None:
+    st.subheader(f"🗺️ Kapitelkarta för: *{bok_titel.title()}*")
+    st.write(f"Inloggad som: **{elev_namn.title()}** | Avklarade kapitel: **{len(klarade)} st**")
+    st.divider()
 
-# 5. Spelet: En fråga i taget
-else:
-    idx = st.session_state.aktuellt_index
-    total = len(st.session_state.uppdrag_lista)
-
-    # Om alla 6 frågor är besvarade:
-    if idx >= total:
-        st.balloons()
-        st.success("🎉 HURRA! Du har klarat alla 6 uppdrag i detta kapitel!")
-        st.markdown("Du har visat att du kan läsa på raderna, mellan raderna och bortom raderna! Grymt jobbat!")
-        if st.button("Börja om med ett nytt kapitel 🔄"):
-            nollstall()
-            st.rerun()
-
-    # Annars visas aktuell fråga
-    else:
-        uppdrag = st.session_state.uppdrag_lista[idx]
+    antal_kapitel_att_visa = max(10, max(klarade) + 2 if klarade else 5)
+    
+    # Skapa nivåknapparna
+    for kap_nr in range(1, antal_kapitel_att_visa + 1):
+        kol1, kol2, kol3 = st.columns([1, 3, 2])
         
-        # Framstegsmätare (t.ex. 1 av 6, 2 av 6)
-        framsteg = (idx) / total
-        st.progress(framsteg)
-        
-        farg_ikon = "🟢" if uppdrag["niva"] == "Lätt" else ("🟡" if uppdrag["niva"] == "Medel" else "🔴")
-        st.subheader(f"{farg_ikon} Uppdrag {uppdrag['nummer']} av {total}: Nivå {uppdrag['niva']}")
-        
-        st.info(f"**Fråga:** {uppdrag['fraga']}")
-
-        # Svarsfält för eleven
-        elev_svar = st.text_area("Skriv ditt svar här:", key=f"svar_{idx}", height=100)
-
-        kol1, kol2 = st.columns([1, 1])
-
         with kol1:
+            if kap_nr in klarade:
+                st.write("⭐ 🏆")
+            elif kap_nr == 1 or (kap_nr - 1) in klarade:
+                st.write("🔓 🎯")
+            else:
+                st.write("🔒")
+
+        with kol2:
+            if kap_nr in klarade:
+                st.write(f"**Kapitel {kap_nr}** (Klarat!)")
+            elif kap_nr == 1 or (kap_nr - 1) in klarade:
+                st.write(f"**Kapitel {kap_nr}** – Redo att spela!")
+            else:
+                st.write(f"Kapitel {kap_nr} – Låst")
+
+        with kol3:
+            # Man får bara spela olösta kapitel om föregående är klarat
+            if kap_nr in klarade:
+                if st.button("Spela igen 🔁", key=f"spela_{kap_nr}"):
+                    st.session_state.aktivt_kapitel = kap_nr
+                    st.session_state.uppdrag_lista = []
+                    st.session_state.aktuellt_index = 0
+                    st.rerun()
+            elif kap_nr == 1 or (kap_nr - 1) in klarade:
+                if st.button("Starta nivå 🚀", key=f"starta_{kap_nr}", type="primary"):
+                    st.session_state.aktivt_kapitel = kap_nr
+                    st.session_state.uppdrag_lista = []
+                    st.session_state.aktuellt_index = 0
+                    st.rerun()
+
+# ---------------------------------------------------------------------
+# VY 2: SPELA ETT KAPITEL
+# ---------------------------------------------------------------------
+else:
+    nuvarande_kap = st.session_state.aktivt_kapitel
+    st.header(f"🎯 Utmaning: Kapitel {nuvarande_kap}")
+
+    # Steg A: Läs in text/bild om uppdrag inte skapats än
+    if not st.session_state.uppdrag_lista:
+        st.write("Läs kapitlet i boken och fota sidan eller klistra in texten för att starta utmaningen.")
+        
+        val = st.radio("Välj metod:", ["Ta ett foto med kameran", "Skriv eller klistra in text"], horizontal=True)
+        bild_data = None
+        text_data = None
+
+        if val == "Ta ett foto med kameran":
+            foto = st.camera_input("Rikta kameran mot boksidan")
+            if foto:
+                raw_img = Image.open(foto)
+                bild_data = raw_img.convert("RGB")
+                bild_data.thumbnail((1200, 1200))
+                st.image(bild_data, caption="Din bild", width=300)
+        else:
+            text_data = st.text_area("Klistra in några rader från kapitlet:", height=150)
+
+        kol_start, kol_avbryt = st.columns(2)
+        with kol_start:
+            if st.button("Lås upp uppdragen ✨", type="primary"):
+                if not bild_data and not text_data:
+                    st.warning("Ta en bild eller mata in text först!")
+                else:
+                    with st.spinner("Läsmästaren skapar dina 6 uppdrag..."):
+                        prompt = f"""
+                        Du är en svensklärare för årskurs 4 och 5. Eleven läser kapitel {nuvarande_kap}.
+                        Läs texten eller bilden noggrant. Skapa exakt 6 frågor anpassade efter Lgr22:
+                        - Fråga 1-3: LÄTT (fakta på raderna)
+                        - Fråga 4-5: MEDEL (känslor, orsaker, mellan raderna)
+                        - Fråga 6: SVÅR (tolkning, reflektion, bortom raderna)
+
+                        Svara ENDAST med en giltig JSON-lista:
+                        [
+                          {{"nummer": 1, "niva": "Lätt", "fraga": "..."}},
+                          {{"nummer": 2, "niva": "Lätt", "fraga": "..."}},
+                          {{"nummer": 3, "niva": "Lätt", "fraga": "..."}},
+                          {{"nummer": 4, "niva": "Medel", "fraga": "..."}},
+                          {{"nummer": 5, "niva": "Medel", "fraga": "..."}},
+                          {{"nummer": 6, "niva": "Svår", "fraga": "..."}}
+                        ]
+                        """
+                        innehall = [prompt]
+                        if bild_data:
+                            innehall.append(bild_data)
+                        if text_data:
+                            innehall.append(text_data)
+
+                        try:
+                            respons = client.models.generate_content(
+                                model="gemini-3.8-flash",
+                                contents=innehall
+                            )
+                            ren_json = re.sub(r"^```(?:json)?\n?|```$", "", respons.text.strip(), flags=re.MULTILINE).strip()
+                            st.session_state.uppdrag_lista = json.loads(ren_json)
+                            st.session_state.aktuellt_index = 0
+                            st.rerun()
+                        except Exception:
+                            st.error("Kunde inte analysera bilden/texten. Försök ta ett tydligare foto!")
+
+        with kol_avbryt:
+            if st.button("⬅️ Tillbaka till kartan"):
+                st.session_state.aktivt_kapitel = None
+                st.rerun()
+
+    # Steg B: Svara på uppdragen ett i taget
+    else:
+        idx = st.session_state.aktuellt_index
+        total = len(st.session_state.uppdrag_lista)
+
+        # Alla 6 avklarade: Spara i profilen!
+        if idx >= total:
+            st.balloons()
+            st.success(f"🏆 HURRA! Du har klarat alla uppdrag i Kapitel {nuvarande_kap}!")
+            
+            # Spara som avklarat om det inte redan är sparat
+            if nuvarande_kap not in elev_profil["klarade_kapitel"]:
+                elev_profil["klarade_kapitel"].append(nuvarande_kap)
+                framsteg_db[profil_nyckel] = elev_profil
+                spara_framsteg(framsteg_db)
+
+            st.write("Ditt framsteg har sparats på spelkartan!")
+            if st.button("Gå till kapitelkartan 🗺️", type="primary"):
+                st.session_state.aktivt_kapitel = None
+                st.session_state.uppdrag_lista = []
+                st.session_state.senaste_feedback = None
+                st.rerun()
+
+        # Visa pågående uppdrag
+        else:
+            uppdrag = st.session_state.uppdrag_lista[idx]
+            st.progress((idx) / total)
+
+            farg = "🟢" if uppdrag["niva"] == "Lätt" else ("🟡" if uppdrag["niva"] == "Medel" else "🔴")
+            st.subheader(f"{farg} Uppdrag {uppdrag['nummer']} av {total}: Nivå {uppdrag['niva']}")
+            st.info(f"**Fråga:** {uppdrag['fraga']}")
+
+            elev_svar = st.text_area("Ditt svar:", key=f"svar_kap_{nuvarande_kap}_{idx}", height=100)
+
             if st.button("Lämna in svar 🚀"):
                 if not elev_svar.strip():
                     st.warning("Skriv ett svar innan du lämnar in!")
                 else:
                     with st.spinner("Läsmästaren läser ditt svar..."):
                         prompt_rattning = f"""
-                        Du är en varm och uppmuntrande svensklärare för årskurs 4-5.
+                        Du är en uppmuntrande svensklärare för årskurs 4-5.
                         Fråga: {uppdrag['fraga']}
-                        Nivå: {uppdrag['niva']}
                         Elevens svar: "{elev_svar}"
 
                         Regler:
-                        - Ignorera helt stavfel, särskrivningar och grammatiska fel. Bedöm bara om eleven förstått innehållet.
-                        - Beröm alltid försöket.
-                        - Ge formativ återkoppling: Är det 'Klarat! ⭐', 'Nästan där! 💡' eller 'Försök igen'?
-                        - Håll det kort (max 3-4 meningar), varmt och barnvänligt.
+                        - Ignorera helt stavfel och särskrivningar. Bedöm bara om eleven visar förståelse.
+                        - Beröm alltid.
+                        - Ge återkoppling med emojis: 'Klarat! ⭐', 'Nästan där! 💡' eller 'Tänk på detta...'.
+                        - Max 3 korta meningar.
                         """
                         try:
                             bedomning = client.models.generate_content(
@@ -155,20 +245,19 @@ else:
                             )
                             st.session_state.senaste_feedback = bedomning.text
                         except Exception:
-                            st.session_state.senaste_feedback = "Kunde inte ansluta till Läsmästaren just nu. Försök klicka igen!"
+                            st.session_state.senaste_feedback = "Kunde inte nå servern. Prova igen!"
 
-        # Visa återkopplingen och knappen för att gå vidare
-        if st.session_state.senaste_feedback:
+            if st.session_state.senaste_feedback:
+                st.divider()
+                st.markdown(st.session_state.senaste_feedback)
+                if st.button("Gå till nästa uppdrag ➡️", type="primary"):
+                    st.session_state.aktuellt_index += 1
+                    st.session_state.senaste_feedback = None
+                    st.rerun()
+
             st.divider()
-            st.markdown(st.session_state.senaste_feedback)
-            
-            # Knapp för att gå till nästa fråga
-            if st.button("Gå till nästa uppdrag ➡️"):
-                st.session_state.aktuellt_index += 1
+            if st.button("⬅️ Avbryt och gå till kartan"):
+                st.session_state.aktivt_kapitel = None
+                st.session_state.uppdrag_lista = []
                 st.session_state.senaste_feedback = None
                 st.rerun()
-
-        st.divider()
-        if st.button("Avbryt och välj ny text / nytt foto"):
-            nollstall()
-            st.rerun()
