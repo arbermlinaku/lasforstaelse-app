@@ -34,22 +34,37 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# Funktion som automatiskt provar igen om Googles servrar är överbelastade (503)
-def anropa_gemini_med_retry(client, model, contents, config=None, max_forsok=3):
-    for forsok in range(max_forsok):
-        try:
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config
-            )
-        except errors.ServerError as e:
-            if forsok < max_forsok - 1:
-                time.sleep(2 * (forsok + 1))  # Vänta 2s, sedan 4s
-            else:
-                raise e
-        except Exception as e:
-            raise e
+# Reservlista av modeller om Google har hög belastning (503)
+MODELL_KEDJA = [
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+    "gemini-2.0-flash",
+    "gemini-3.8-flash"
+]
+
+def anropa_gemini_med_fallback(client, contents, config=None):
+    """Försöker anropa modeller i turordning. Vid 503 (överbelastning) byts modell automatiskt."""
+    senaste_fel = None
+    for modell_namn in MODELL_KEDJA:
+        for forsok in range(2):
+            try:
+                return client.models.generate_content(
+                    model=modell_namn,
+                    contents=contents,
+                    config=config
+                )
+            except errors.ServerError as e:
+                senaste_fel = e
+                time.sleep(1.5)  # Kort paus innan nästa försök
+            except Exception as e:
+                # Om det är ett 503-fel i feltexten, fortsätt till reservmodellen
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    senaste_fel = e
+                    time.sleep(1.0)
+                    break
+                else:
+                    raise e
+    raise senaste_fel
 
 # 3. Sessionsvariabler för spelet
 if "spelar_data" not in st.session_state:
@@ -159,9 +174,9 @@ else:
         with kol_start:
             if st.button("Lås upp uppdragen ✨", type="primary"):
                 if not bild_data and (not text_data or len(text_data.strip()) < 15):
-                    st.warning("Skriv eller klistra in några rader ur boken (inte bara titeln), eller ta en bild!")
+                    st.warning("Klistra in några rader ur boken eller ta ett foto först!")
                 else:
-                    with st.spinner("Läsmästaren läser och skapar dina 6 uppdrag..."):
+                    with st.spinner("Läsmästaren skapar dina 6 uppdrag..."):
                         prompt = f"""
                         Du är en svensklärare för årskurs 4 och 5. Eleven läser kapitel {nuvarande_kap}.
                         Läs texten eller bilden noggrant. Skapa exakt 6 frågor anpassade efter Lgr22:
@@ -186,9 +201,8 @@ else:
                             innehall.append(text_data)
 
                         try:
-                            respons = anropa_gemini_med_retry(
+                            respons = anropa_gemini_med_fallback(
                                 client=client,
-                                model="gemini-3.8-flash",
                                 contents=innehall,
                                 config=types.GenerateContentConfig(
                                     response_mime_type="application/json"
@@ -203,10 +217,8 @@ else:
                             st.session_state.aktuellt_index = 0
                             st.rerun()
 
-                        except errors.ServerError:
-                            st.warning("⏳ Googles AI-servrar är tillfälligt överbelastade just nu. Vänta 10–15 sekunder och klicka på 'Lås upp uppdragen' igen!")
-                        except Exception as e:
-                            st.error(f"Ett fel inträffade: {e}")
+                        except Exception:
+                            st.warning("Googles servrar är ovanligt hårt belastade just nu. Vänta några sekunder och klicka igen!")
 
         with kol_avbryt:
             if st.button("⬅️ Tillbaka till kartan"):
@@ -260,16 +272,13 @@ else:
                         - Max 3 korta meningar.
                         """
                         try:
-                            bedomning = anropa_gemini_med_retry(
+                            bedomning = anropa_gemini_med_fallback(
                                 client=client,
-                                model="gemini-3.8-flash",
                                 contents=[prompt_rattning]
                             )
                             st.session_state.senaste_feedback = bedomning.text
-                        except errors.ServerError:
-                            st.session_state.senaste_feedback = "⏳ AI-servern svarade inte just nu på grund av hög belastning. Klicka på knappen igen!"
-                        except Exception as e:
-                            st.session_state.senaste_feedback = f"Kunde inte nå servern just nu: {e}"
+                        except Exception:
+                            st.session_state.senaste_feedback = "Servern är tillfälligt upptagen. Klicka på 'Lämna in svar' en gång till!"
 
             if st.session_state.senaste_feedback:
                 st.divider()
