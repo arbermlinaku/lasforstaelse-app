@@ -6,11 +6,11 @@ from google.genai import errors
 import json
 import os
 import re
+import time
 
 # 1. Sidkonfiguration
 st.set_page_config(page_title="Läsmästaren: Bokäventyret", page_icon="🎮", layout="centered")
 
-# Fil för att spara elevernas framsteg
 SPARFIL = "framsteg.json"
 
 def ladda_framsteg():
@@ -33,6 +33,23 @@ if not api_key:
     st.stop()
 
 client = genai.Client(api_key=api_key)
+
+# Funktion som automatiskt provar igen om Googles servrar är överbelastade (503)
+def anropa_gemini_med_retry(client, model, contents, config=None, max_forsok=3):
+    for forsok in range(max_forsok):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+        except errors.ServerError as e:
+            if forsok < max_forsok - 1:
+                time.sleep(2 * (forsok + 1))  # Vänta 2s, sedan 4s
+            else:
+                raise e
+        except Exception as e:
+            raise e
 
 # 3. Sessionsvariabler för spelet
 if "spelar_data" not in st.session_state:
@@ -122,7 +139,7 @@ else:
     st.header(f"🎯 Utmaning: Kapitel {nuvarande_kap}")
 
     if not st.session_state.uppdrag_lista:
-        st.write("Läs kapitlet i boken och fota sidan eller klistra in texten för att starta utmaningen.")
+        st.write("Läs kapitlet i boken och fota sidan eller klistra in text från handlingen för att starta utmaningen.")
         
         val = st.radio("Välj metod:", ["Ta ett foto med kameran", "Skriv eller klistra in text"], horizontal=True)
         bild_data = None
@@ -136,15 +153,15 @@ else:
                 bild_data.thumbnail((1200, 1200))
                 st.image(bild_data, caption="Din bild", width=300)
         else:
-            text_data = st.text_area("Klistra in några rader från kapitlet:", height=150)
+            text_data = st.text_area("Klistra in några rader eller ett stycke från kapitlet:", height=150)
 
         kol_start, kol_avbryt = st.columns(2)
         with kol_start:
             if st.button("Lås upp uppdragen ✨", type="primary"):
-                if not bild_data and not text_data:
-                    st.warning("Mata in text eller ta en bild först!")
+                if not bild_data and (not text_data or len(text_data.strip()) < 15):
+                    st.warning("Skriv eller klistra in några rader ur boken (inte bara titeln), eller ta en bild!")
                 else:
-                    with st.spinner("Läsmästaren skapar dina 6 uppdrag..."):
+                    with st.spinner("Läsmästaren läser och skapar dina 6 uppdrag..."):
                         prompt = f"""
                         Du är en svensklärare för årskurs 4 och 5. Eleven läser kapitel {nuvarande_kap}.
                         Läs texten eller bilden noggrant. Skapa exakt 6 frågor anpassade efter Lgr22:
@@ -152,7 +169,7 @@ else:
                         - Fråga 4 till 5: MEDEL (känslor, orsaker, slutsatser mellan raderna)
                         - Fråga 6: SVÅR (budskap, reflektion bortom raderna)
 
-                        Du måste svara som en JSON-lista med exakt detta format:
+                        Svara som en strikt JSON-lista:
                         [
                           {{"nummer": 1, "niva": "Lätt", "fraga": "..."}},
                           {{"nummer": 2, "niva": "Lätt", "fraga": "..."}},
@@ -169,8 +186,8 @@ else:
                             innehall.append(text_data)
 
                         try:
-                            # response_mime_type tvingar Gemini att enbart svara med ren JSON
-                            respons = client.models.generate_content(
+                            respons = anropa_gemini_med_retry(
+                                client=client,
                                 model="gemini-3.8-flash",
                                 contents=innehall,
                                 config=types.GenerateContentConfig(
@@ -179,20 +196,17 @@ else:
                             )
                             
                             svar_text = respons.text.strip()
-                            
-                            # Säkerställ att vi plockar ut arrayen [...] även om modellen lagt något runtomkring
                             match = re.search(r"\[.*\]", svar_text, re.DOTALL)
-                            if match:
-                                json_str = match.group(0)
-                            else:
-                                json_str = svar_text
+                            json_str = match.group(0) if match else svar_text
 
                             st.session_state.uppdrag_lista = json.loads(json_str)
                             st.session_state.aktuellt_index = 0
                             st.rerun()
 
+                        except errors.ServerError:
+                            st.warning("⏳ Googles AI-servrar är tillfälligt överbelastade just nu. Vänta 10–15 sekunder och klicka på 'Lås upp uppdragen' igen!")
                         except Exception as e:
-                            st.error(f"Ett fel inträffade vid tolkningen: {e}")
+                            st.error(f"Ett fel inträffade: {e}")
 
         with kol_avbryt:
             if st.button("⬅️ Tillbaka till kartan"):
@@ -246,11 +260,14 @@ else:
                         - Max 3 korta meningar.
                         """
                         try:
-                            bedomning = client.models.generate_content(
+                            bedomning = anropa_gemini_med_retry(
+                                client=client,
                                 model="gemini-3.8-flash",
                                 contents=[prompt_rattning]
                             )
                             st.session_state.senaste_feedback = bedomning.text
+                        except errors.ServerError:
+                            st.session_state.senaste_feedback = "⏳ AI-servern svarade inte just nu på grund av hög belastning. Klicka på knappen igen!"
                         except Exception as e:
                             st.session_state.senaste_feedback = f"Kunde inte nå servern just nu: {e}"
 
