@@ -1,6 +1,7 @@
 import streamlit as st
 from PIL import Image
 from google import genai
+from google.genai import types
 from google.genai import errors
 import json
 import os
@@ -9,7 +10,7 @@ import re
 # 1. Sidkonfiguration
 st.set_page_config(page_title="Läsmästaren: Bokäventyret", page_icon="🎮", layout="centered")
 
-# Fil för att spara alla elevers framsteg
+# Fil för att spara elevernas framsteg
 SPARFIL = "framsteg.json"
 
 def ladda_framsteg():
@@ -49,14 +50,13 @@ st.title("🎮 Läsmästaren: Bokäventyret")
 
 # 4. Spelarprofil & Inloggning
 st.sidebar.header("👤 Spelarprofil")
-elev_namn = st.sidebar.text_input("Ditt namn eller hemliga alias:").strip().lower()
+elev_namn = st.sidebar.text_input("Ditt namn eller alias:").strip().lower()
 bok_titel = st.sidebar.text_input("Bokens titel:").strip().lower()
 
 if not elev_namn or not bok_titel:
-    st.info("👋 Välkommen! Börja med att skriva in ditt namn och bokens titel i menyn till vänster för att ladda din sparfil.")
+    st.info("👋 Välkommen! Skriv in ditt namn och bokens titel i menyn till vänster för att starta.")
     st.stop()
 
-# Skapa eller hämta elevens profil i sparfilen
 profil_nyckel = f"{elev_namn}###{bok_titel}"
 framsteg_db = ladda_framsteg()
 
@@ -64,7 +64,7 @@ if profil_nyckel not in framsteg_db:
     framsteg_db[profil_nyckel] = {
         "namn": elev_namn,
         "bok": bok_titel,
-        "klarade_kapitel": []  # t.ex. [1, 2]
+        "klarade_kapitel": []
     }
     spara_framsteg(framsteg_db)
 
@@ -72,17 +72,16 @@ elev_profil = framsteg_db[profil_nyckel]
 klarade = set(elev_profil.get("klarade_kapitel", []))
 
 # ---------------------------------------------------------------------
-# VY 1: SPELKARTAN (Visas när eleven inte är mitt i ett uppdrag)
+# VY 1: SPELKARTAN
 # ---------------------------------------------------------------------
 if st.session_state.aktivt_kapitel is None:
     st.subheader(f"🗺️ Kapitelkarta för: *{bok_titel.title()}*")
-    st.write(f"Inloggad som: **{elev_namn.title()}** | Avklarade kapitel: **{len(klarade)} st**")
+    st.write(f"Inloggad som: **{elev_namn.title()}** | Klarade kapitel: **{len(klarade)} st**")
     st.divider()
 
-    antal_kapitel_att_visa = max(10, max(klarade) + 2 if klarade else 5)
+    antal_kapitel = max(10, max(klarade) + 2 if klarade else 5)
     
-    # Skapa nivåknapparna
-    for kap_nr in range(1, antal_kapitel_att_visa + 1):
+    for kap_nr in range(1, antal_kapitel + 1):
         kol1, kol2, kol3 = st.columns([1, 3, 2])
         
         with kol1:
@@ -102,7 +101,6 @@ if st.session_state.aktivt_kapitel is None:
                 st.write(f"Kapitel {kap_nr} – Låst")
 
         with kol3:
-            # Man får bara spela olösta kapitel om föregående är klarat
             if kap_nr in klarade:
                 if st.button("Spela igen 🔁", key=f"spela_{kap_nr}"):
                     st.session_state.aktivt_kapitel = kap_nr
@@ -123,7 +121,6 @@ else:
     nuvarande_kap = st.session_state.aktivt_kapitel
     st.header(f"🎯 Utmaning: Kapitel {nuvarande_kap}")
 
-    # Steg A: Läs in text/bild om uppdrag inte skapats än
     if not st.session_state.uppdrag_lista:
         st.write("Läs kapitlet i boken och fota sidan eller klistra in texten för att starta utmaningen.")
         
@@ -145,17 +142,17 @@ else:
         with kol_start:
             if st.button("Lås upp uppdragen ✨", type="primary"):
                 if not bild_data and not text_data:
-                    st.warning("Ta en bild eller mata in text först!")
+                    st.warning("Mata in text eller ta en bild först!")
                 else:
                     with st.spinner("Läsmästaren skapar dina 6 uppdrag..."):
                         prompt = f"""
                         Du är en svensklärare för årskurs 4 och 5. Eleven läser kapitel {nuvarande_kap}.
                         Läs texten eller bilden noggrant. Skapa exakt 6 frågor anpassade efter Lgr22:
-                        - Fråga 1-3: LÄTT (fakta på raderna)
-                        - Fråga 4-5: MEDEL (känslor, orsaker, mellan raderna)
-                        - Fråga 6: SVÅR (tolkning, reflektion, bortom raderna)
+                        - Fråga 1 till 3: LÄTT (faktafrågor på raderna)
+                        - Fråga 4 till 5: MEDEL (känslor, orsaker, slutsatser mellan raderna)
+                        - Fråga 6: SVÅR (budskap, reflektion bortom raderna)
 
-                        Svara ENDAST med en giltig JSON-lista:
+                        Du måste svara som en JSON-lista med exakt detta format:
                         [
                           {{"nummer": 1, "niva": "Lätt", "fraga": "..."}},
                           {{"nummer": 2, "niva": "Lätt", "fraga": "..."}},
@@ -172,33 +169,44 @@ else:
                             innehall.append(text_data)
 
                         try:
+                            # response_mime_type tvingar Gemini att enbart svara med ren JSON
                             respons = client.models.generate_content(
                                 model="gemini-3.8-flash",
-                                contents=innehall
+                                contents=innehall,
+                                config=types.GenerateContentConfig(
+                                    response_mime_type="application/json"
+                                )
                             )
-                            ren_json = re.sub(r"^```(?:json)?\n?|```$", "", respons.text.strip(), flags=re.MULTILINE).strip()
-                            st.session_state.uppdrag_lista = json.loads(ren_json)
+                            
+                            svar_text = respons.text.strip()
+                            
+                            # Säkerställ att vi plockar ut arrayen [...] även om modellen lagt något runtomkring
+                            match = re.search(r"\[.*\]", svar_text, re.DOTALL)
+                            if match:
+                                json_str = match.group(0)
+                            else:
+                                json_str = svar_text
+
+                            st.session_state.uppdrag_lista = json.loads(json_str)
                             st.session_state.aktuellt_index = 0
                             st.rerun()
-                        except Exception:
-                            st.error("Kunde inte analysera bilden/texten. Försök ta ett tydligare foto!")
+
+                        except Exception as e:
+                            st.error(f"Ett fel inträffade vid tolkningen: {e}")
 
         with kol_avbryt:
             if st.button("⬅️ Tillbaka till kartan"):
                 st.session_state.aktivt_kapitel = None
                 st.rerun()
 
-    # Steg B: Svara på uppdragen ett i taget
     else:
         idx = st.session_state.aktuellt_index
         total = len(st.session_state.uppdrag_lista)
 
-        # Alla 6 avklarade: Spara i profilen!
         if idx >= total:
             st.balloons()
             st.success(f"🏆 HURRA! Du har klarat alla uppdrag i Kapitel {nuvarande_kap}!")
             
-            # Spara som avklarat om det inte redan är sparat
             if nuvarande_kap not in elev_profil["klarade_kapitel"]:
                 elev_profil["klarade_kapitel"].append(nuvarande_kap)
                 framsteg_db[profil_nyckel] = elev_profil
@@ -211,7 +219,6 @@ else:
                 st.session_state.senaste_feedback = None
                 st.rerun()
 
-        # Visa pågående uppdrag
         else:
             uppdrag = st.session_state.uppdrag_lista[idx]
             st.progress((idx) / total)
@@ -244,8 +251,8 @@ else:
                                 contents=[prompt_rattning]
                             )
                             st.session_state.senaste_feedback = bedomning.text
-                        except Exception:
-                            st.session_state.senaste_feedback = "Kunde inte nå servern. Prova igen!"
+                        except Exception as e:
+                            st.session_state.senaste_feedback = f"Kunde inte nå servern just nu: {e}"
 
             if st.session_state.senaste_feedback:
                 st.divider()
