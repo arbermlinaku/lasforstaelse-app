@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 
 # 1. Sidkonfiguration
 st.set_page_config(page_title="Läsmästaren: Bokäventyret", page_icon="🎮", layout="centered")
@@ -66,6 +67,8 @@ if "aktuellt_index" not in st.session_state:
     st.session_state.aktuellt_index = 0
 if "senaste_feedback" not in st.session_state:
     st.session_state.senaste_feedback = None
+if "genomforda_svar" not in st.session_state:
+    st.session_state.genomforda_svar = []  # Sparar frågor, svar och feedback
 
 st.title("🎮 Läsmästaren: Bokäventyret")
 
@@ -127,12 +130,14 @@ if st.session_state.aktivt_kapitel is None:
                     st.session_state.aktivt_kapitel = kap_nr
                     st.session_state.uppdrag_lista = []
                     st.session_state.aktuellt_index = 0
+                    st.session_state.genomforda_svar = []
                     st.rerun()
             elif kap_nr == 1 or (kap_nr - 1) in klarade:
                 if st.button("Starta nivå 🚀", key=f"starta_{kap_nr}", type="primary"):
                     st.session_state.aktivt_kapitel = kap_nr
                     st.session_state.uppdrag_lista = []
                     st.session_state.aktuellt_index = 0
+                    st.session_state.genomforda_svar = []
                     st.rerun()
 
 # ---------------------------------------------------------------------
@@ -170,7 +175,6 @@ else:
             if pdf_fil:
                 st.success(f"PDF laddad: {pdf_fil.name}")
                 pdf_bytes = pdf_fil.read()
-                # Skicka PDF-data direkt till Gemini via Part.from_bytes
                 innehall_delar.append(
                     types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
                 )
@@ -197,11 +201,11 @@ else:
                     with st.spinner("Läsmästaren läser underlaget och skapar 6 nya uppdrag..."):
                         prompt = f"""
                         Du är en svensklärare för årskurs 4 och 5. Eleven arbetar med del/kapitel {nuvarande_kap}.
-                        Läs det bifogade underlaget (text, bild eller PDF-dokument) noggrant.
+                        Läs det bifogade underlaget noggrant.
                         Skapa exakt 6 läsförståelsefrågor anpassade efter Lgr22:
-                        - Fråga 1 till 3: LÄTT (faktafrågor där svaret står rakt ut i texten, 'på raderna')
-                        - Fråga 4 till 5: MEDEL (inferensfrågor om känslor, orsaker eller samband, 'mellan raderna')
-                        - Fråga 6: SVÅR (tolkning, budskap eller personlig reflektion, 'bortom raderna')
+                        - Fråga 1 till 3: LÄTT (faktafrågor på raderna)
+                        - Fråga 4 till 5: MEDEL (inferensfrågor mellan raderna)
+                        - Fråga 6: SVÅR (tolkning eller reflektion bortom raderna)
 
                         Du måste svara som en strikt JSON-lista:
                         [
@@ -213,7 +217,6 @@ else:
                           {{"nummer": 6, "niva": "Svår", "fraga": "..."}}
                         ]
                         """
-                        
                         contents = [prompt] + innehall_delar
 
                         try:
@@ -231,6 +234,7 @@ else:
 
                             st.session_state.uppdrag_lista = json.loads(json_str)
                             st.session_state.aktuellt_index = 0
+                            st.session_state.genomforda_svar = []
                             st.rerun()
 
                         except Exception as e:
@@ -245,6 +249,9 @@ else:
         idx = st.session_state.aktuellt_index
         total = len(st.session_state.uppdrag_lista)
 
+        # -------------------------------------------------------------
+        # RESULTAT- OCH NEDLADDNINGSSKÄRM (Alla 6 frågor klara)
+        # -------------------------------------------------------------
         if idx >= total:
             st.balloons()
             st.success(f"🏆 HURRA! Du har klarat alla uppdrag i Del {nuvarande_kap}!")
@@ -254,13 +261,52 @@ else:
                 framsteg_db[profil_nyckel] = elev_profil
                 spara_framsteg(framsteg_db)
 
-            st.write("Ditt framsteg har sparats på spelkartan!")
-            if st.button("Gå till kartan 🗺️", type="primary"):
+            st.write("Ditt framsteg har sparats på spelkartan! Nu kan du ladda ner din läsrapport och lämna in till läraren.")
+
+            # Sammanställ rapporttexten för nedladdning
+            idag = datetime.now().strftime("%Y-%m-%d %H:%M")
+            rapport_rader = [
+                "==================================================",
+                "        📖 LÄSRAPPORT - LÄSMÄSTAREN 📖",
+                "==================================================",
+                f"Elev: {elev_namn.title()}",
+                f"Bok / Häfte: {bok_titel.title()}",
+                f"Kapitel / Del: {nuvarande_kap}",
+                f"Datum & tid: {idag}",
+                "Status: Alla 6 uppdrag genomförda och rättade",
+                "==================================================\n"
+            ]
+
+            for post in st.session_state.genomforda_svar:
+                rapport_rader.append(f"[UPPDRAG {post['nummer']} - NIVÅ: {post['niva'].upper()}]")
+                rapport_rader.append(f"Fråga: {post['fraga']}")
+                rapport_rader.append(f"Elevens svar:\n{post['svar']}")
+                rapport_rader.append(f"Läsmästarens respons:\n{post['feedback']}")
+                rapport_rader.append("-" * 50 + "\n")
+
+            komplett_rapport = "\n".join(rapport_rader)
+
+            # Ladda ner-knapp
+            filnamn = f"Lasrapport_{elev_namn}_kap_{nuvarande_kap}.txt"
+            st.download_button(
+                label="📥 Ladda ner min läsrapport (Textfil)",
+                data=komplett_rapport,
+                file_name=filnamn,
+                mime="text/plain",
+                type="primary"
+            )
+
+            st.divider()
+            if st.button("Gå tillbaka till kartan 🗺️"):
                 st.session_state.aktivt_kapitel = None
                 st.session_state.uppdrag_lista = []
                 st.session_state.senaste_feedback = None
+                st.session_state.genomforda_svar = []
                 st.rerun()
 
+        # -------------------------------------------------------------
+        # PÅGÅENDE UPPDRAG (Fråga 1 till 6)
+        # -------------------------------------------------------------
         else:
             uppdrag = st.session_state.uppdrag_lista[idx]
             st.progress((idx) / total)
@@ -296,10 +342,20 @@ else:
                         except Exception as e:
                             st.session_state.senaste_feedback = f"Kunde inte nå servern: {e}"
 
+            # När feedback finns: spara i loggen och visa knapp för nästa fråga
             if st.session_state.senaste_feedback:
                 st.divider()
                 st.markdown(st.session_state.senaste_feedback)
+                
                 if st.button("Gå till nästa uppdrag ➡️", type="primary"):
+                    # Spara i svarsloggen innan vi går vidare
+                    st.session_state.genomforda_svar.append({
+                        "nummer": uppdrag["nummer"],
+                        "niva": uppdrag["niva"],
+                        "fraga": uppdrag["fraga"],
+                        "svar": elev_svar,
+                        "feedback": st.session_state.senaste_feedback
+                    })
                     st.session_state.aktuellt_index += 1
                     st.session_state.senaste_feedback = None
                     st.rerun()
@@ -309,4 +365,5 @@ else:
                 st.session_state.aktivt_kapitel = None
                 st.session_state.uppdrag_lista = []
                 st.session_state.senaste_feedback = None
+                st.session_state.genomforda_svar = []
                 st.rerun()
