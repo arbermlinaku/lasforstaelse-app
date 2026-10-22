@@ -2,7 +2,6 @@ import streamlit as st
 from PIL import Image
 from google import genai
 from google.genai import types
-from google.genai import errors
 import json
 import os
 import re
@@ -34,36 +33,31 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# Reservlista av modeller om Google har hög belastning (503)
+# Endast aktiva och moderna modeller i prioritetsordning
 MODELL_KEDJA = [
-    "gemini-2.5-flash",
-    "gemini-flash-latest",
-    "gemini-2.0-flash",
-    "gemini-3.8-flash"
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite"
 ]
 
 def anropa_gemini_med_fallback(client, contents, config=None):
-    """Försöker anropa modeller i turordning. Vid 503 (överbelastning) byts modell automatiskt."""
+    """Testar modellerna i turordning. Om en modell är överbelastad (503) eller otillgänglig prövas nästa direkt."""
     senaste_fel = None
     for modell_namn in MODELL_KEDJA:
-        for forsok in range(2):
-            try:
-                return client.models.generate_content(
-                    model=modell_namn,
-                    contents=contents,
-                    config=config
-                )
-            except errors.ServerError as e:
-                senaste_fel = e
-                time.sleep(1.5)  # Kort paus innan nästa försök
-            except Exception as e:
-                # Om det är ett 503-fel i feltexten, fortsätt till reservmodellen
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    senaste_fel = e
-                    time.sleep(1.0)
-                    break
-                else:
-                    raise e
+        try:
+            return client.models.generate_content(
+                model=modell_namn,
+                contents=contents,
+                config=config
+            )
+        except Exception as e:
+            senaste_fel = e
+            # Om modellen har hög belastning eller inte svarar, ta en kort paus och prova nästa i kedjan
+            time.sleep(1.0)
+            continue
+            
+    # Om alla modeller i listan misslyckades
     raise senaste_fel
 
 # 3. Sessionsvariabler för spelet
@@ -217,8 +211,8 @@ else:
                             st.session_state.aktuellt_index = 0
                             st.rerun()
 
-                        except Exception:
-                            st.warning("Googles servrar är ovanligt hårt belastade just nu. Vänta några sekunder och klicka igen!")
+                        except Exception as e:
+                            st.error(f"Kunde inte ladda uppdragen: {e}")
 
         with kol_avbryt:
             if st.button("⬅️ Tillbaka till kartan"):
@@ -277,8 +271,8 @@ else:
                                 contents=[prompt_rattning]
                             )
                             st.session_state.senaste_feedback = bedomning.text
-                        except Exception:
-                            st.session_state.senaste_feedback = "Servern är tillfälligt upptagen. Klicka på 'Lämna in svar' en gång till!"
+                        except Exception as e:
+                            st.session_state.senaste_feedback = f"Kunde inte få kontakt med Läsmästaren: {e}"
 
             if st.session_state.senaste_feedback:
                 st.divider()
